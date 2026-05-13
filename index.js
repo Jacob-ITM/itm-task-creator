@@ -71,7 +71,10 @@ app.post('/slack/events', async (req, res) => {
   const parts = text.split('|').map(p => p.trim());
   const taskName = parts[1] || 'Untitled Task';
   const taskDesc = parts[2] || 'No description provided.';
-  const assigneeEmail = parts[3] || null;
+  const emailField = parts[3] || null;
+  const emailList = emailField ? emailField.split(',').map(e => e.trim()) : [];
+  const assigneeEmail = emailList[0] || null;
+  const followerEmails = emailList.slice(1).join(',') || null;
   const channel = event.channel;
   const slackUserId = event.user;
 
@@ -93,6 +96,7 @@ app.post('/slack/events', async (req, res) => {
     // Create Asana task
     const asanaBody = { data: { name: taskName, notes: taskDesc, workspace: ASANA_WORKSPACE } };
     if (asanaAssignee) asanaBody.data.assignee = asanaAssignee;
+    if (followerEmails) asanaBody.data.followers = followerEmails;
 
     const asanaRes = await axios.post(
       'https://app.asana.com/api/1.0/tasks',
