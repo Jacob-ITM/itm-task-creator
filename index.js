@@ -1,27 +1,65 @@
 const express = require('express');
 const axios = require('axios');
+const fs = require('fs');
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const ASANA_TOKEN = process.env.ASANA_TOKEN;
-const BOX_DEVELOPER_TOKEN = process.env.BOX_DEVELOPER_TOKEN;
+const BOX_CLIENT_ID = process.env.BOX_CLIENT_ID;
+const BOX_CLIENT_SECRET = process.env.BOX_CLIENT_SECRET;
 const BOX_PARENT_FOLDER_ID = '378152598280';
 const ASANA_WORKSPACE = '1209414882370188';
 
-// Map Slack user IDs to Asana emails
-const SLACK_TO_ASANA = {
-  // This gets populated automatically via Slack API
+let boxTokens = {
+  access_token: process.env.BOX_ACCESS_TOKEN || null,
+  refresh_token: process.env.BOX_REFRESH_TOKEN || null,
 };
+
+// Refresh Box token automatically
+async function getBoxToken() {
+  if (!boxTokens.refresh_token) throw new Error('No Box refresh token available');
+  const res = await axios.post('https://api.box.com/oauth2/token', new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: boxTokens.refresh_token,
+    client_id: BOX_CLIENT_ID,
+    client_secret: BOX_CLIENT_SECRET,
+  }));
+  boxTokens.access_token = res.data.access_token;
+  boxTokens.refresh_token = res.data.refresh_token;
+  return boxTokens.access_token;
+}
+
+// Box OAuth login route - visit this once in browser to authorize
+app.get('/box/login', (req, res) => {
+  const authUrl = `https://account.box.com/api/oauth2/authorize?response_type=code&client_id=${BOX_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.RAILWAY_PUBLIC_DOMAIN ? 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN + '/box/callback' : 'http://localhost:3000/box/callback')}`;
+  res.redirect(authUrl);
+});
+
+// Box OAuth callback - Box sends token here after login
+app.get('/box/callback', async (req, res) => {
+  const { code } = req.query;
+  try {
+    const tokenRes = await axios.post('https://api.box.com/oauth2/token', new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: BOX_CLIENT_ID,
+      client_secret: BOX_CLIENT_SECRET,
+      redirect_uri: process.env.RAILWAY_PUBLIC_DOMAIN ? 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN + '/box/callback' : 'http://localhost:3000/box/callback',
+    }));
+    boxTokens.access_token = tokenRes.data.access_token;
+    boxTokens.refresh_token = tokenRes.data.refresh_token;
+    res.send('✅ Box connected successfully! You can close this tab and use the Slack bot.');
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.send('❌ Box authorization failed. Please try again.');
+  }
+});
 
 app.post('/slack/events', async (req, res) => {
   const body = req.body;
-
-  if (body.type === 'url_verification') {
-    return res.json({ challenge: body.challenge });
-  }
-
+  if (body.type === 'url_verification') return res.json({ challenge: body.challenge });
   res.sendStatus(200);
 
   const event = body.event;
@@ -42,29 +80,18 @@ app.post('/slack/events', async (req, res) => {
 
     // Determine assignee
     let asanaAssignee = null;
-
     if (assigneeEmail) {
-      // Use the email provided in the command
       asanaAssignee = assigneeEmail;
     } else {
-      // Look up the Slack user's email and use that
       const slackUserRes = await axios.get(
         `https://slack.com/api/users.info?user=${slackUserId}`,
         { headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` } }
       );
-      if (slackUserRes.data.ok) {
-        asanaAssignee = slackUserRes.data.user.profile.email;
-      }
+      if (slackUserRes.data.ok) asanaAssignee = slackUserRes.data.user.profile.email;
     }
 
     // Create Asana task
-    const asanaBody = {
-      data: {
-        name: taskName,
-        notes: taskDesc,
-        workspace: ASANA_WORKSPACE,
-      }
-    };
+    const asanaBody = { data: { name: taskName, notes: taskDesc, workspace: ASANA_WORKSPACE } };
     if (asanaAssignee) asanaBody.data.assignee = asanaAssignee;
 
     const asanaRes = await axios.post(
@@ -75,11 +102,12 @@ app.post('/slack/events', async (req, res) => {
     const asanaTask = asanaRes.data.data;
     const asanaUrl = `https://app.asana.com/0/0/${asanaTask.gid}`;
 
-    // Create Box folder
+    // Get fresh Box token and create folder
+    const boxToken = await getBoxToken();
     const boxRes = await axios.post(
       'https://api.box.com/2.0/folders',
       { name: taskName, parent: { id: BOX_PARENT_FOLDER_ID } },
-      { headers: { Authorization: `Bearer ${BOX_DEVELOPER_TOKEN}` } }
+      { headers: { Authorization: `Bearer ${boxToken}` } }
     );
     const boxFolder = boxRes.data;
     const boxUrl = `https://app.box.com/folder/${boxFolder.id}`;
@@ -91,10 +119,8 @@ app.post('/slack/events', async (req, res) => {
       { headers: { Authorization: `Bearer ${ASANA_TOKEN}` } }
     );
 
-    const assignedTo = asanaAssignee ? `👤 *Assigned to:* ${asanaAssignee}` : '';
-    await postSlack(channel,
-      `✅ Done! Here's what was created:\n📋 *Asana Task:* ${asanaUrl}\n📁 *Box Folder:* ${boxUrl}${assignedTo ? '\n' + assignedTo : ''}`
-    );
+    const assignedTo = asanaAssignee ? `\n👤 *Assigned to:* ${asanaAssignee}` : '';
+    await postSlack(channel, `✅ Done! Here's what was created:\n📋 *Asana Task:* ${asanaUrl}\n📁 *Box Folder:* ${boxUrl}${assignedTo}`);
 
   } catch (err) {
     console.error(err.response?.data || err.message);
