@@ -9,6 +9,10 @@ const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const ASANA_TOKEN = process.env.ASANA_TOKEN;
 const BOX_CLIENT_ID = process.env.BOX_CLIENT_ID;
 const BOX_CLIENT_SECRET = process.env.BOX_CLIENT_SECRET;
+const RAILWAY_API_TOKEN = process.env.RAILWAY_API_TOKEN;
+const RAILWAY_PROJECT_ID = process.env.RAILWAY_PROJECT_ID;
+const RAILWAY_ENVIRONMENT_ID = process.env.RAILWAY_ENVIRONMENT_ID;
+const RAILWAY_SERVICE_ID = process.env.RAILWAY_SERVICE_ID;
 const BOX_PARENT_FOLDER_ID = '378152598280';
 const ASANA_WORKSPACE = '1209414882370188';
 const processedEvents = new Set();
@@ -17,6 +21,34 @@ let boxTokens = {
   access_token: null,
   refresh_token: process.env.BOX_REFRESH_TOKEN || null
 };
+
+async function saveRefreshToken(token) {
+  try {
+    await axios.post(
+      'https://backboard.railway.app/graphql/v2',
+      {
+        query: `mutation {
+          variableUpsert(input: {
+            projectId: "${RAILWAY_PROJECT_ID}",
+            environmentId: "${RAILWAY_ENVIRONMENT_ID}",
+            serviceId: "${RAILWAY_SERVICE_ID}",
+            name: "BOX_REFRESH_TOKEN",
+            value: "${token}"
+          })
+        }`
+      },
+      {
+        headers: {
+          Authorization: 'Bearer ' + RAILWAY_API_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    console.log('Box refresh token saved to Railway');
+  } catch (err) {
+    console.error('Failed to save refresh token to Railway:', err.response ? err.response.data : err.message);
+  }
+}
 
 async function getBoxToken() {
   if (!boxTokens.refresh_token) {
@@ -33,6 +65,7 @@ async function getBoxToken() {
   );
   boxTokens.access_token = res.data.access_token;
   boxTokens.refresh_token = res.data.refresh_token;
+  await saveRefreshToken(res.data.refresh_token);
   return boxTokens.access_token;
 }
 
@@ -65,7 +98,9 @@ app.get('/box/callback', function(req, res) {
   ).then(function(tokenRes) {
     boxTokens.access_token = tokenRes.data.access_token;
     boxTokens.refresh_token = tokenRes.data.refresh_token;
-    res.send('<h2>Box connected!</h2><p>Copy this refresh token and save it as BOX_REFRESH_TOKEN in Railway:</p><textarea rows="4" cols="80" onclick="this.select()">' + tokenRes.data.refresh_token + '</textarea>');
+    return saveRefreshToken(tokenRes.data.refresh_token).then(function() {
+      res.send('<h2>Box connected successfully!</h2><p>Your token has been saved to Railway permanently. You can close this tab and use the Slack bot.</p>');
+    });
   }).catch(function(err) {
     console.error(err.response ? err.response.data : err.message);
     res.send('Box authorization failed. Please try again.');
@@ -137,9 +172,11 @@ app.post('/slack/events', function(req, res) {
       { data: asanaData },
       { headers: { Authorization: 'Bearer ' + ASANA_TOKEN } }
     ).then(function(asanaRes) {
-      const asanaTask = asanaRes.data.data;
-      const asanaUrl = 'https://app.asana.com/0/0/' + asanaTask.gid;
-      return { asanaTask: asanaTask, asanaUrl: asanaUrl, asanaAssignee: asanaAssignee };
+      return {
+        asanaTask: asanaRes.data.data,
+        asanaUrl: 'https://app.asana.com/0/0/' + asanaRes.data.data.gid,
+        asanaAssignee: asanaAssignee
+      };
     });
   })
   .then(function(data) {
@@ -162,9 +199,7 @@ app.post('/slack/events', function(req, res) {
         throw err;
       });
     }).then(function(boxRes) {
-      const boxFolder = boxRes.data;
-      const boxUrl = 'https://app.box.com/folder/' + boxFolder.id;
-      return { data: data, boxUrl: boxUrl };
+      return { data: data, boxUrl: 'https://app.box.com/folder/' + boxRes.data.id };
     });
   })
   .then(function(result) {
