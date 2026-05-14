@@ -11,7 +11,7 @@ const BOX_CLIENT_SECRET = process.env.BOX_CLIENT_SECRET;
 const BOX_PARENT_FOLDER_ID = '378152598280';
 const ASANA_WORKSPACE = '1209414882370188';
 
-// Load refresh token from Railway environment variable
+// Load refresh token from Railway environment variable on startup
 let boxTokens = {
   access_token: null,
   refresh_token: process.env.BOX_REFRESH_TOKEN || null,
@@ -25,7 +25,6 @@ async function getBoxToken() {
     client_id: BOX_CLIENT_ID,
     client_secret: BOX_CLIENT_SECRET,
   }));
-  // Update tokens in memory
   boxTokens.access_token = res.data.access_token;
   boxTokens.refresh_token = res.data.refresh_token;
   return boxTokens.access_token;
@@ -52,8 +51,6 @@ app.get('/box/callback', async (req, res) => {
     }));
     boxTokens.access_token = tokenRes.data.access_token;
     boxTokens.refresh_token = tokenRes.data.refresh_token;
-
-    // Show the refresh token so you can save it to Railway manually
     res.send(`
       <h2>✅ Box connected successfully!</h2>
       <p>Copy the refresh token below and save it as <strong>BOX_REFRESH_TOKEN</strong> in your Railway variables:</p>
@@ -90,7 +87,7 @@ app.post('/slack/events', async (req, res) => {
   try {
     await postSlack(channel, `⏳ Got it! Creating task *${taskName}*...`);
 
-    // Determine assignee
+    // Determine assignee — use provided email or look up Slack sender
     let asanaAssignee = null;
     if (assigneeEmail) {
       asanaAssignee = assigneeEmail;
@@ -117,14 +114,35 @@ app.post('/slack/events', async (req, res) => {
     const asanaTask = asanaRes.data.data;
     const asanaUrl = `https://app.asana.com/0/0/${asanaTask.gid}`;
 
-    // Create Box folder with fresh token
+    // Create Box folder — handle duplicate names automatically
     const boxToken = await getBoxToken();
-    const boxRes = await axios.post(
-      'https://api.box.com/2.0/folders',
-      { name: taskName, parent: { id: BOX_PARENT_FOLDER_ID } },
-      { headers: { Authorization: `Bearer ${boxToken}` } }
-    );
-    const boxFolder = boxRes.data;
+    let boxFolder;
+    let folderName = taskName;
+
+    try {
+      const boxRes = await axios.post(
+        'https://api.box.com/2.0/folders',
+        { name: folderName, parent: { id: BOX_PARENT_FOLDER_ID } },
+        { headers: { Authorization: `Bearer ${boxToken}` } }
+      );
+      boxFolder = boxRes.data;
+    } catch (err) {
+      if (err.response?.data?.code === 'item_name_in_use') {
+        // Add date and time to guarantee uniqueness
+        const now = new Date();
+        const timestamp = now.toISOString().slice(0, 16).replace('T', ' ');
+        folderName = `${taskName} (${timestamp})`;
+        const boxRes2 = await axios.post(
+          'https://api.box.com/2.0/folders',
+          { name: folderName, parent: { id: BOX_PARENT_FOLDER_ID } },
+          { headers: { Authorization: `Bearer ${boxToken}` } }
+        );
+        boxFolder = boxRes2.data;
+      } else {
+        throw err;
+      }
+    }
+
     const boxUrl = `https://app.box.com/folder/${boxFolder.id}`;
 
     // Update Asana task with Box link
