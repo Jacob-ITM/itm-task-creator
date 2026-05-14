@@ -11,6 +11,9 @@ const BOX_CLIENT_SECRET = process.env.BOX_CLIENT_SECRET;
 const BOX_PARENT_FOLDER_ID = '378152598280';
 const ASANA_WORKSPACE = '1209414882370188';
 
+// Deduplicate Slack events — prevents double firing
+const processedEvents = new Set();
+
 // Load refresh token from Railway environment variable on startup
 let boxTokens = {
   access_token: null,
@@ -65,8 +68,17 @@ app.get('/box/callback', async (req, res) => {
 
 app.post('/slack/events', async (req, res) => {
   const body = req.body;
+
+  // Handle Slack URL verification
   if (body.type === 'url_verification') return res.json({ challenge: body.challenge });
+
   res.sendStatus(200);
+
+  // Deduplicate — ignore if we've already processed this event
+  const eventId = body.event_id;
+  if (!eventId || processedEvents.has(eventId)) return;
+  processedEvents.add(eventId);
+  setTimeout(() => processedEvents.delete(eventId), 60000);
 
   const event = body.event;
   if (!event || event.type !== 'message' || event.subtype || !event.text) return;
@@ -164,13 +176,4 @@ app.post('/slack/events', async (req, res) => {
   }
 });
 
-async function postSlack(channel, text) {
-  await axios.post(
-    'https://slack.com/api/chat.postMessage',
-    { channel, text },
-    { headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` } }
-  );
-}
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+async f
